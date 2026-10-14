@@ -97,39 +97,37 @@ DeepSeek-V4.1-Flash 从预训练阶段开始引入多模态数据，使用 DeepS
 
 **模型不断创新，并行框架也需要随之演进。** HyperParallel 希望通过模型实现与系统优化解耦，让新架构能够复用成熟的并行基础能力，降低前沿模型的适配和训练成本。
 
-## 三、训练实践：一键拉起 DeepSeek-V4.1-Flash 分布式训练
+## 三、训练实践：从模型加载到分布式训练
 
-在完成模型架构与核心算子的适配后，HyperParallel 进一步提供了 DeepSeek-V4.1-Flash 的端到端训练示例，覆盖**纯文本训练、多模态训练以及多种分布式并行策略**。
+在完成模型架构与核心训练组件适配后，HyperParallel 提供了 DeepSeek-V4.1-Flash 的端到端训练示例，覆盖**纯文本训练、多模态训练以及 TP、CP、EP、FSDP 等多种分布式并行能力**。
 
-依托统一的 Trainer 训练接口、声明式 YAML 配置和模块化并行策略，用户无需手动编排复杂的模型并行逻辑，即可通过启动脚本快速完成模型构建、数据准备、分布式初始化和训练执行。
+依托统一的 Trainer 训练接口、声明式 YAML 配置和模块化并行策略，用户无需在训练入口中手动编排复杂的并行逻辑，即可完成模型构建、组件替换、数据处理、分布式初始化和训练执行。
 
-下面以昇腾 NPU 环境为例，介绍 DeepSeek-V4.1-Flash 在 HyperParallel 上的训练流程。
+下面以本次实际验证使用的 **单机8卡 Ascend 910B3 NPU（单卡64 GiB HBM）** 环境为例，介绍 DeepSeek-V4.1-Flash 在 HyperParallel 上的训练流程。后文训练结果同样基于该8卡环境测试，Demo配置与实测配置保持一致。
 
 ### 1. 模型与环境准备
 
 为便于快速验证新架构的训练能力，HyperParallel 提供了 DeepSeek-V4.1-Flash 的模型裁剪构建器 `build_cropped_deepseek_v41()`。
 
-该构建器读取官方模型配置，在保留关键网络结构和层角色的基础上，对部分参数维度进行缩放，并通过 `HyperAutoModelForCausalLM.from_config()` 初始化模型。
+该构建器读取官方模型配置，在保留关键网络结构和层角色的基础上，对部分参数维度进行缩放，并通过 `HyperAutoModelForCausalLM.from_config()` 随机初始化模型。
 
-当前训练示例支持以下两种场景：
+当前训练示例支持纯文本和多模态两种场景：
 
-| 配置项            | 纯文本训练    | 多模态训练    |
-| -------------- | -------- | -------- |
-| 语言模型层数         | 40 层     | 40 层     |
-| 视觉模型层数         | —        | 32 层     |
-| 参数维度缩放         | 1/8      | 1/4      |
-| Routed Experts | 16       | 16       |
-| 最大序列长度         | 4096     | 4096     |
-| 默认训练步数         | 1        | 10       |
-| 默认训练设备         | 16 卡 NPU | 16 卡 NPU |
+| 配置项            | 纯文本训练            | 多模态训练            |
+| -------------- | ---------------- | ---------------- |
+| 语言模型层数         | 保留全部40层          | 保留全部40层          |
+| 视觉模型层数         | —                | 保留全部32个视觉Block   |
+| 文本参数维度缩放       | 1/8              | 1/4              |
+| 视觉参数维度缩放       | —                | 1/4              |
+| Routed Experts | 16               | 16               |
+| 最大序列长度         | 4096             | 4096             |
+| 实测设备           | 8 × Ascend 910B3 | 8 × Ascend 910B3 |
 
-裁剪过程保留模型的主干深度、指定层的功能以及核心计算结构，能够在更可控的资源规模下验证 CED、CSA2、Engram、MoE 等模块的训练流程。
+参数维度缩放主要作用于模型宽度、Head数量、低秩维度等参数规格，并不意味着模型总参数量严格按相同比例缩减。模型仍保留主干深度及指定层的功能角色，以便在较小资源规模下验证 CSA2、Engram、mHC、MoE 等核心模块的训练流程。
 
-需要说明的是，参数维度缩放并不等于模型总参数量按相同比例缩减。本示例从官方配置构建并随机初始化模型，主要用于训练链路验证，完整规模训练仍需另行进行资源配置和精度验证。
+需要说明的是，**本示例从官方配置构建并随机初始化裁剪模型，并非加载完整552B骨干参数的预训练权重**。当前实验主要用于验证模型结构、分布式训练链路及资源开销，完整规模模型训练仍需进一步进行资源配置、精度及稳定性验证。
 
-**环境安装**
-
-首先获取并安装 HyperParallel：
+首先获取 HyperParallel 源码并配置昇腾训练环境：
 
 ```bash
 git clone https://github.com/mindspore-ai/hyper-parallel.git
@@ -139,141 +137,126 @@ source /path/to/Ascend/cann/set_env.sh
 python -m pip install -e .
 ```
 
-运行前需准备与环境匹配的 PyTorch、torch-npu、CANN、Transformers，以及增强稀疏 Attention 所依赖的 `omni_training_custom_ops` 算子包。
-
-准备官方模型配置与 Tokenizer，并设置模型目录：
+随后准备 DeepSeek-V4.1-Flash 官方模型配置和Tokenizer，并设置本地模型路径：
 
 ```bash
 export DSV41_MODEL_DIR=/path/to/DeepSeek-V4.1-Flash
 export PYTHON_BIN=python
+export NPROC_PER_NODE=8
 ```
 
-完成上述准备后，即可开始训练。
+本次实测环境使用 Ascend 910B3 NPU、CANN 9.1.0、PyTorch 2.9.0、torch-npu 2.9.0.post6 和 Transformers 5.13.0，并安装与环境匹配的 `omni_training_custom_ops`，用于支持增强稀疏 Attention 等相关算子。
 
 ### 2. 纯文本训练：支持 TP、CP 等多种并行配置
 
-HyperParallel 提供了开箱即用的纯文本训练示例，能够自动生成本地测试数据和 Engram 元数据，完成模型初始化与分布式训练。
+HyperParallel 提供了统一的 DeepSeek-V4.1-Flash 纯文本训练入口，可通过不同运行模式快速切换 TP、CP 等并行策略。
 
-**Step 1：启动 TP1 基础训练**
+本次实验使用8卡 Ascend 910B3，将 Global Batch Size 设置为8、Micro Batch Size设置为1，并根据不同并行策略调整EP及FSDP分片配置。
 
-以单机 16 卡为例，在 HyperParallel 根目录执行：
+首先启动TP1基础训练：
 
 ```bash
-NPROC_PER_NODE=16 bash \
+NPROC_PER_NODE=8 bash \
   examples/training_demo/deepseek_v41/run_deepseek_v41_online.sh \
   "$DSV41_MODEL_DIR" tp1 \
-  --training.train_iters=1 \
-  --checkpoint.restore_from=null
+  --training.train_iters=6 \
+  --training.global_batch_size=8 \
+  --accelerator.ep_size=8 \
+  --fsdp_config.dp_shard_size=8 \
+  --checkpoint.restore_from=null \
+  --checkpoint.save_ckpt=false \
+  --dataset.data_path=/path/to/online_4k_aligned.jsonl
 ```
 
-训练脚本自动完成以下流程：
+训练脚本自动完成模型资产检查、Engram元数据准备、分布式进程启动、模型构建及组件替换，并通过 `TextTrainer` 执行前向计算、反向传播、梯度同步和优化器更新。
 
-1. **模型资产准备**：加载官方配置及 Tokenizer，按需生成裁剪后的 Engram 元数据。
-2. **数据准备**：自动生成长文本 JSONL 数据，并在训练过程中在线分词。
-3. **分布式初始化**：利用 `torch.distributed.run` 启动多个 NPU 训练进程，初始化分布式通信环境。
-4. **模型构建与并行适配**：根据 YAML 配置完成模型初始化、组件替换、参数分片和并行策略部署。
-5. **训练执行**：通过 `TextTrainer` 完成前向计算、反向传播、梯度同步和优化器更新。
-
-训练结束后，输出 `run_tp1.log` 日志，并在脚本成功执行后生成 `tp1.success` 标记，便于后续训练验证。
-
-**Step 2：切换 TP2 / CP2 并行策略**
-
-基于统一的训练脚本，用户只需调整启动模式，即可切换不同的并行配置：
+在TP1训练验证通过后，可以进一步切换至TP2或CP2：
 
 ```bash
-# TP2：张量并行
-NPROC_PER_NODE=16 bash \
+# TP2 + Sequence Parallel
+NPROC_PER_NODE=8 bash \
   examples/training_demo/deepseek_v41/run_deepseek_v41_online.sh \
   "$DSV41_MODEL_DIR" tp2 \
-  --checkpoint.restore_from=null
+  --training.train_iters=6 \
+  --training.global_batch_size=8 \
+  --accelerator.ep_size=8 \
+  --fsdp_config.dp_shard_size=4 \
+  --checkpoint.restore_from=null \
+  --checkpoint.save_ckpt=false \
+  --dataset.data_path=/path/to/online_4k_aligned.jsonl
 
-# CP2：上下文并行
-NPROC_PER_NODE=16 bash \
+# CP2
+NPROC_PER_NODE=8 bash \
   examples/training_demo/deepseek_v41/run_deepseek_v41_online.sh \
   "$DSV41_MODEL_DIR" cp2 \
-  --checkpoint.restore_from=null
+  --training.train_iters=6 \
+  --training.global_batch_size=8 \
+  --accelerator.ep_size=8 \
+  --fsdp_config.dp_shard_size=8 \
+  --checkpoint.restore_from=null \
+  --checkpoint.save_ckpt=false \
+  --dataset.data_path=/path/to/online_4k_aligned.jsonl
 ```
 
-当前示例提供以下并行组合：
+本次实测对应的三种纯文本并行配置如下：
 
-| 模式  | TP | CP | EP | FSDP 分片数 |
-| --- | -: | -: | -: | -------: |
-| TP1 |  1 |  1 | 16 |       16 |
-| TP2 |  2 |  1 | 16 |        8 |
-| CP2 |  1 |  2 | 16 |       16 |
+| 模式  | TP | CP | EP | FSDP分片数 | Global Batch | 梯度累积 | Sequence Parallel |
+| --- | -: | -: | -: | ------: | -----------: | ---: | ----------------- |
+| TP1 |  1 |  1 |  8 |       8 |            8 |    1 | 关闭                |
+| TP2 |  2 |  1 |  8 |       4 |            8 |    2 | 开启                |
+| CP2 |  1 |  2 |  8 |       8 |            8 |    2 | 关闭                |
 
-其中，TP2 模式需要先通过 TP1 基础训练验证；CP2 模式则采用共享注意力 KV AllGather 路径。
+三种模式均采用PP=1、Micro Batch Size=1。其中TP2通过张量并行与Sequence Parallel切分计算和中间状态；CP2则沿序列维度进行上下文并行，本次基线采用共享Attention KV AllGather路径。
 
-通过不同并行模式的组合，HyperParallel 可对 DeepSeek-V4.1-Flash 的 Attention、MoE 及其他模块进行分布式训练验证，为后续更大规模的集群训练提供基础。
-
-此外，用户还可根据实际设备数量调整 EP Size、FSDP 分片数和 Global Batch Size，实现训练资源的灵活配置。
+需要注意的是，设备数量与并行配置需要协同调整。单独修改 `NPROC_PER_NODE` 并不会自动改变EP、FSDP分片数或Global Batch Size，因此切换设备规模时，需要同步调整对应的并行拓扑参数。
 
 ### 3. 多模态训练：统一支持视觉与语言联合训练
 
 除纯文本训练外，HyperParallel 同样提供 DeepSeek-V4.1-Flash 的图文多模态训练示例。
 
-多模态训练基于 `VLMTrainer`，采用统一的训练框架管理视觉编码器、语言模型、数据预处理及参数优化过程。
+多模态训练通过统一的 `VLMTrainer` 管理视觉编码器、语言模型、图文数据预处理及参数优化过程。
 
-**Step 1：准备图文数据**
-
-当前示例使用 OpenAI Messages 格式的 JSONL 数据，支持文本与图片组合输入，例如：
+训练数据采用 OpenAI Messages 格式的 JSONL，例如：
 
 ```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "描述图片中的物体。"},
-        {
-          "type": "image_url",
-          "image_url": {"url": "images/example.png"}
-        }
-      ]
-    },
-    {
-      "role": "assistant",
-      "content": "图片中是一只猫。"
-    }
-  ]
-}
+{"messages":[{"role":"user","content":[{"type":"text","text":"描述图片中的物体。"},{"type":"image_url","image_url":{"url":"images/example.png"}}]},{"role":"assistant","content":"图片中是一只猫。"}]}
 ```
 
-将各条 JSON 记录分别保存为 JSONL 文件，并准备对应图片，即可用于多模态训练。
-
-训练过程中，框架自动完成图像预处理、文本 Tokenization、图文输入组织及训练标签构建。
-
-**Step 2：启动多模态训练**
-
-通过以下命令，可启动单机 16 卡、10 Step 的多模态训练：
+准备对应图片和JSONL数据后，即可启动8卡多模态训练：
 
 ```bash
-RUN_NAME=guide_vlm_10steps NPROC_PER_NODE=16 \
-  bash examples/training_demo/deepseek_v41/run_deepseek_v41_vlm_online.sh \
+RUN_NAME=dsv41_vlm_10steps \
+NPROC_PER_NODE=8 \
+HCCL_NPU_SOCKET_PORT_RANGE=auto \
+bash examples/training_demo/deepseek_v41/run_deepseek_v41_vlm_online.sh \
   "$DSV41_MODEL_DIR" /path/to/v41-data/train.jsonl \
   --training.train_iters=10 \
-  --checkpoint.restore_from=null
+  --training.global_batch_size=8 \
+  --accelerator.ep_size=8 \
+  --fsdp_config.dp_shard_size=8 \
+  --checkpoint.restore_from=null \
+  --checkpoint.checkpoint_dir=./output/deepseek_v41/vlm_checkpoints
 ```
 
-当前多模态配置采用 TP=1、CP=1、EP=8、FSDP 分片数为 8 的并行组合，结合 Muon + AdamW 优化器与 FP32 主参数机制，实现图文联合训练的完整执行流程。
+本次多模态实验采用 **TP=1、CP=1、EP=8、FSDP分片数=8、Global Batch Size=8** 的并行配置，完成10次优化器更新。
 
-HyperParallel 根据 YAML 中声明的 `plan_overrides`，自动完成 mHC、Engram、Attention 等组件替换，并绑定 CSA2 并行 Wrapper、Engram EP 查表和 MoE 专家并行计算。
+训练过程中，HyperParallel 根据YAML中的 `plan_overrides` 自动完成mHC、Engram、共享压缩Attention等模型组件的替换及并行包装，并绑定CSA2相关并行策略、Engram EP查表和MoE专家并行计算。
 
-从模型构建、分布式策略部署，到数据处理、梯度更新及 Checkpoint 管理，均可通过统一的 Trainer 流程执行，无需在训练入口中手动编排各模块的并行操作。
+从图文数据处理、模型构建、分布式初始化，到前向计算、反向传播、优化器更新和Checkpoint保存，均通过统一的Trainer训练流程完成，无需在训练入口中额外手工编排各模块的并行逻辑。
 
 ### 4. 训练结果：训练指标可视化与模型正确性验证
 
-基于 **单机8卡 Ascend 910B3 NPU（单卡64 GiB HBM）**，HyperParallel 完成了 DeepSeek-V4.1-Flash 的纯文本及多模态训练验证。实验采用随机初始化的裁剪模型，保留关键模块与网络深度，使用合成数据验证端到端训练流程。
+基于 **单机8卡 Ascend 910B3 NPU（单卡64 GiB HBM）**，HyperParallel完成了DeepSeek-V4.1-Flash的纯文本及多模态训练验证。实验采用随机初始化的裁剪模型，保留关键模块与网络深度，使用合成数据验证端到端训练流程。
 
 **（1）纯文本训练：多种并行策略验证**
 
-TP1、TP2 + Sequence Parallel 和 CP2 三种并行配置均成功完成6个训练Step，Loss及梯度范数均保持有限值。
+TP1、TP2 + Sequence Parallel和CP2三种并行配置均成功完成6个训练Step，Loss及梯度范数均保持有限值。
 
-| 指标 | TP1 | TP2 + SP | CP2 |
-|---|---:|---:|---:|
-| 平均步时（s） | 19.57 | 38.71 | 23.30 |
-| 吞吐（Tokens/s） | 1,674.77 | 846.56 | 1,406.62 |
-| 峰值分配显存（GiB） | 39.08 | 24.42 | 20.65 |
+| 指标           |      TP1 | TP2 + SP |      CP2 |
+| ------------ | -------: | -------: | -------: |
+| 平均步时（s）      |    19.57 |    38.71 |    23.30 |
+| 吞吐（Tokens/s） | 1,674.77 |   846.56 | 1,406.62 |
+| 峰值分配显存（GiB）  |    39.08 |    24.42 |    20.65 |
 
 本次实验中，TP1取得最高训练吞吐；CP2相比TP1降低约 **47%** 的峰值分配显存，平均步时增加约19%，体现了不同并行策略在训练性能与内存开销之间的灵活权衡。
 
@@ -283,22 +266,22 @@ TP1、TP2 + Sequence Parallel 和 CP2 三种并行配置均成功完成6个训�
 
 多模态训练成功完成10次优化器更新，Loss由 **12.1633下降至10.5255**，训练过程中Loss及梯度范数均保持有限值。
 
-| 指标 | 实测结果 |
-|---|---:|
-| 完成步数 | 10/10 |
-| 平均步时 | 5.76 s |
-| 峰值分配显存 | 9.25 GiB |
+| 指标     |      实测结果 |
+| ------ | --------: |
+| 完成步数   |     10/10 |
+| 平均步时   |    5.76 s |
+| 峰值分配显存 |  9.25 GiB |
 | 峰值保留显存 | 11.03 GiB |
 
 ![多模态训练Loss曲线](assets/article/deepseek-v41-vlm-loss.png)
 
-![多模态训练日志](assets/article/deepseek-v41-training-log.png)
+![多模态训练逐步指标](assets/article/deepseek-v41-training-log.png)
 
 此外，本次实验成功保存了多模态训练Checkpoint，相关模型单元测试通过，进一步验证了模型组件与训练流程的可执行性。
 
-**本次实测验证了HyperParallel对DeepSeek-V4.1-Flash纯文本、多模态及多维并行训练的端到端支持能力。** 实验结果基于裁剪模型、合成数据与短程训练，完整规模模型性能、长程收敛及Checkpoint恢复仍有待进一步验证。
+**本次实测验证了HyperParallel对DeepSeek-V4.1-Flash纯文本、多模态及多维并行训练的端到端支持能力。** 实验结果基于裁剪模型、合成数据与短程训练，完整规模模型性能、长程收敛、跨并行策略数值对齐及Checkpoint恢复仍有待进一步验证。
 
-*注：平均步时排除首步开销；纯文本吞吐按有效Token统计。多模态样本未填满4K上下文，两类训练的步时不宜直接比较。*
+*注：平均步时排除首步开销；纯文本吞吐按有效Token统计。多模态样本未填满4K上下文，两类训练的步时不宜直接比较。
 
 
 ## 四、结语：让前沿模型创新更快落地
