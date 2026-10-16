@@ -1,4 +1,4 @@
-# HyperParallel 适配 DeepSeek-V4.1-Flash：拥抱前沿模型架构，释放昇腾大模型训练潜能
+# HyperParallel 基于昇腾支持 DeepSeek-V4.1-Flash：拥抱前沿模型架构，释放昇腾大模型训练潜能
 
 ## 一、前言：DeepSeek-V4.1-Flash 发布，大模型训练迎来新挑战
 
@@ -14,7 +14,7 @@
 
 面向 DeepSeek-V4.1-Flash 的新架构与新需求，HyperParallel 开展模型训练适配，依托可组合的分布式并行能力和模块化系统设计，探索前沿模型在昇腾算力平台上的高效训练实践。
 
-## 二、聚焦模型技术创新，HyperParallel 构建高效训练支撑
+## 二、聚焦模型技术创新，HyperParallel 面向昇腾超节点构建高效训练支撑
 
 ### 1. Causal Encoder-Decoder：非对称架构，提升计算效率
 
@@ -99,7 +99,7 @@ DeepSeek-V4.1-Flash 从预训练阶段开始引入多模态数据，使用 DeepS
 
 ## 三、训练实践：从模型加载到分布式训练
 
-在完成模型架构与核心训练组件适配后，HyperParallel 提供了 DeepSeek-V4.1-Flash 的端到端训练示例，覆盖**纯文本训练、多模态训练以及 TP、CP、EP、FSDP 等多种分布式并行能力**。
+在完成模型架构与核心训练组件支持后，HyperParallel 提供了 DeepSeek-V4.1-Flash 的端到端训练示例，覆盖**纯文本训练、多模态训练以及 TP、CP、EP、FSDP 等多种分布式并行能力**。
 
 依托统一的 Trainer 训练接口、声明式 YAML 配置和模块化并行策略，用户无需在训练入口中手动编排复杂的并行逻辑，即可完成模型构建、组件替换、数据处理、分布式初始化和训练执行。
 
