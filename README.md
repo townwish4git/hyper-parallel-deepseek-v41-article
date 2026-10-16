@@ -1,4 +1,4 @@
-# HyperParallel 基于昇腾支持 DeepSeek-V4.1-Flash：拥抱前沿模型架构，释放昇腾大模型训练潜能
+# HyperParallel 基于昇腾支持 DeepSeek-V4.1-Flash 训练：拥抱前沿模型架构，释放昇腾大模型训练潜能
 
 ## 一、前言：DeepSeek-V4.1-Flash 发布，大模型训练迎来新挑战
 
@@ -16,6 +16,8 @@
 
 ## 二、聚焦模型技术创新，HyperParallel 面向昇腾超节点构建高效训练支撑
 
+DeepSeek-V4.1-Flash 的新设计，对训练框架提出的不只是新增模型层的要求，还涉及跨层状态传递、参数分片、激活重计算、稀疏数据访问、优化器更新和设备算子的协同。面向这些挑战，HyperParallel 在已有 TP、CP、EP、FSDP 等基础能力之上，围绕六项核心技术开展适配，并结合昇腾软件栈中可复用的高性能算子，逐步打通从模型结构到分布式训练的完整链路。
+
 ### 1. Causal Encoder-Decoder：非对称架构，提升计算效率
 
 DeepSeek-V4.1-Flash 的重要创新之一，是采用 Causal Encoder-Decoder（CED）架构，将输入处理与输出生成划分为不同的计算路径。
@@ -26,6 +28,7 @@ DeepSeek-V4.1-Flash 的重要创新之一，是采用 Causal Encoder-Decoder（C
 
 ![DeepSeek-V4.1-Flash 总体架构：因果编码器、解码器及跨层 KV 路径](assets/article/deepseek-v41-architecture.png)
 
+CED 及其共享注意力结构使模型各层不再拥有完全相同的计算与状态依赖。HyperParallel 在模型实现中依据配置确定不同层的压缩率、共享 KV 来源和索引来源，将共享状态贯穿层间前向计算，并为参数分片、FSDP 包装与激活重计算保留明确的模块边界。注意力投影、共享 KV 投影和 Indexer 等参数也按照各自计算角色采用对应的布局策略。
 
 ### 2. CSA2：跨层 KV 共享，挑战传统注意力计算模式
 
@@ -46,6 +49,12 @@ CSA2 结合 FP4 KV Cache，使模型的全局 KV Cache 占用降低至约 **890 
 ![分层稀疏索引：首层建立候选池，后续 Reindex 层在池内选择 Top-512](assets/article/csa2-hierarchical-indexer.png)
 
 
+针对 CSA2 的跨层数据依赖，HyperParallel 建立共享状态管理机制，区分压缩 KV、Indexer Key、候选块与 Top-K 结果的生产和复用关系，保留分层候选选择及 Indexer 辅助训练目标。在 TP 场景下，框架协调局部注意力计算与跨分片结果汇总；在 CP 场景下，通过可微通信组织共享 KV、索引相关状态的跨卡访问，并将通信发起与等待过程分离，为计算与通信协同创造条件。
+
+跨层共享还给激活重计算带来挑战：多个后续层可能依赖前面某层生成的同一份状态。对此，HyperParallel 实现**感知 Full、Reindex、Reuse 层角色的选择性重计算策略**，在保证前向选区与反向依赖一致的同时，避免重计算重复发布共享状态。
+
+HyperParallel 通过 `omni_training_custom_ops` 注册的 `torch.ops.custom.npu_sparse_flash_attention_enhance` 接入昇腾稀疏 Attention 前反向计算，并完成 Scalar Sink 等训练语义的张量组织与梯度接线。后续HyperParallel 将在进一步的融合优化中对接 **CANN 提供的 Lightning Indexer V2、Sparse Flash MLA 前反向和 Indexer KL 梯度融合算子**。
+
 ### 3. Engram：超大规模条件记忆，探索高效参数管理
 
 DeepSeek-V4.1-Flash 引入 **Engram 条件记忆模块**，通过基于 N-gram 的确定性哈希索引与稀疏查表机制，将部分知识记忆与 Transformer 主干计算解耦。
@@ -55,6 +64,11 @@ DeepSeek-V4.1-Flash 引入 **Engram 条件记忆模块**，通过基于 N-gram �
 这一设计有助于提升模型能力，但超大规模 Embedding Table 也对训练系统的参数存储、数据访问及优化器状态管理提出了更高要求。
 
 ![Engram 官方架构图：N-gram 哈希查表、拼接与上下文门控](assets/article/engram-architecture.png)
+
+在模型语义上，HyperParallel 实现 N-gram 哈希映射与查表，处理跨文档边界和图像 Token Mask，避免不符合语义的记忆索引。在并行训练中，Engram Embedding 可沿 EP 维度按行分片：查询请求路由至参数所属设备，查表结果回填原始 Token 位置，反向梯度再按参数所有权回传，无须每次聚合完整参数表。
+
+针对更大规模的稀疏记忆，HyperParallel 进一步提供 **CPU 常驻 Engram 参数表**方案。参数行保存在主机内存中，查表时先去重并仅搬运命中行，反向阶段聚合稀疏梯度，在 CPU 侧执行 SparseAdam 更新，同时支持配套的参数和优化器状态保存与恢复。
+
 
 ### 4. Head-wise Muon 与 Sinkhorn：面向参数结构的新型优化器
 
@@ -83,6 +97,11 @@ DeepSeek-V4.1-Flash 在 mHC（Manifold-Constrained Hyper-Connections）基础上
 
 配合 Mega-mHC 融合算子，模型推理阶段可以显著减少中间激活的数据读写开销。
 
+在模型层，HyperParallel 适配跨子层的残差状态传递与延迟混合机制，处理前一子层的更新在下一计算边界完成的训练语义，并兼顾 Engram、模型输出等特殊边界。在设备执行层，框架进一步提供 **MegaMhc 训练前反向路径**：围绕 Token Tile 构建任务图、事件依赖和执行顺序，将混合、归一化、投影与 Sinkhorn 等操作组织为连续的计算流水。
+
+**其中，基础数学计算复用 CANN 提供的 `MhcPost`、`MhcPreSinkhorn`、`RMSNorm` 等算子原语；HyperParallel 在此基础上完成 MegaKernel 任务调度、融合执行和反向传播接线。** 相关自定义算子通过 torch-npu 提供的 C++ 扩展及 ACLNN 桥接机制接入 PyTorch 训练计算图，并非由 torch-npu 内置接口独立实现整个 MegaMhc。
+
+这一方案将成熟的设备算子能力与框架侧流水编排结合，为降低碎片化算子执行开销提供了实现路径。
 
 ### 6. 原生多模态 MoE：灵活组合并行策略，释放集群算力
 
@@ -92,7 +111,13 @@ DeepSeek-V4.1-Flash 从预训练阶段开始引入多模态数据，使用 DeepS
 
 这种多模态与 MoE 相结合的结构，使得视觉计算、语言计算、专家通信以及长序列 Attention 需要在统一训练流程中协同执行。
 
-可结合**模型图 1**底部的视觉与文本入口阅读本节：视觉特征经投影后与文本 Embedding 一起进入语言主干，各层 MoE 再承担条件计算。输入路径详见 [V4.1 报告 §2.1.1](https://arxiv.org/html/2609.19969v1#S2.SS1.SSS1)。
+针对模型的多模态架构，HyperParallel 完成了 DeepSeek-ViT 的 Patch Embedding、Attention、2D RoPE 与视觉投影适配，将视觉特征注入对应文本位置，并维护图像 Token 与 Engram 文本记忆之间的边界。在视觉并行方面，框架提供 **Encoder Parallel**，沿图像 Patch 序列切分计算，通过 Ulysses 布局转换与特征回传对接语言主干，同时为视觉模块设置独立的参数分片边界。
+
+在 MoE 侧，HyperParallel 复用 EP 体系实现专家分片、Token Dispatch/Combine 及 Grouped GEMM 计算，并保留 V4.1 特有的 **FP32 Clipped SwiGLU** 计算语义，避免以普通 SwiGLU 替换后改变专家网络行为。
+
+**专家矩阵计算直接复用 torch-npu 与 CANN 的现有能力。** HyperParallel 通过 `torch_npu.npu_grouped_matmul` 接口执行 Grouped GEMM 及相应反向计算，torch-npu/op-plugin 负责将接口桥接到 CANN GroupedMatmul 算子，由 CANN 提供底层设备计算实现。与此同时，当前 Grouped GEMM 路径中的 Clipped SwiGLU 仍保留 HyperParallel 的 FP32 计算逻辑，不能将整个专家 MLP 描述为单个已融合的 torch-npu 算子。
+
+围绕进一步的融合与训练目标优化，HyperParallel 已接入部分 MegaGate 能力，并持续完善 MegaMoe 训练路径、动态专家工作量管理以及图像/文本分模态负载均衡更新。**其中部分功能仍处于开放 PR 阶段，是否启用取决于实际训练配置。**
 
 
 **模型不断创新，并行框架也需要随之演进。** HyperParallel 希望通过模型实现与系统优化解耦，让新架构能够复用成熟的并行基础能力，降低前沿模型的适配和训练成本。
